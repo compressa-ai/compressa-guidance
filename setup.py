@@ -101,14 +101,14 @@ def find_version(*file_paths):
 
 setup(
     name="compressa-guidance",
-    version=find_version("compressa_guidance", "__init__.py"),
+    version=find_version("compressa-guidance", "__init__.py"),
     url="https://github.com/compressa-ai/compressa-guidance#",
     author="Guidance Maintainers and Compressa-AI",
     author_email="maintainers@guidance-ai.org",
     description="A guidance language for controlling large language models.",
     long_description="Guidance enables you to control modern language models more effectively and efficiently than traditional prompting or chaining. Guidance programs allow you to interleave generation, prompting, and logical control into a single continuous flow matching how the language model actually processes the text.",
     packages=find_packages(exclude=["notebooks", "client", "tests", "tests.*"]),
-    package_data={"compressa_guidance": ["resources/*"]},
+    package_data={"compressa-guidance": ["resources/*"]},
     python_requires=">=3.10",
     install_requires=install_requires,
     extras_require={
