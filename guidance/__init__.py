@@ -1,4 +1,4 @@
-__version__ = "0.3.0.compressa"
+__version__ = "0.3.0c"
 
 import sys
 from types import ModuleType
