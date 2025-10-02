@@ -64,13 +64,29 @@ class Interpreter(Generic[S]):
         image_bytes = bytes_from(node.url, allow_local=False)
         return self.image_blob(ImageBlob(data=base64.b64encode(image_bytes)), **kwargs)
 
-    def grammar(self, node: GrammarNode, **kwargs) -> Iterator[OutputAttr]:  # noqa ARG002
-        raise UnsupportedNodeError(interpreter=self, node=node)
+    def grammar(self, node: GrammarNode, **kwargs) -> Iterator[OutputAttr]:
+        raise UnsupportedNodeError(interpreter=self, node=node) # noqa ARG002
 
     def regex(self, node: RegexNode, **kwargs) -> Iterator[OutputAttr]:
         return self.grammar(node, **kwargs)
 
     def select(self, node: SelectNode, **kwargs) -> Iterator[OutputAttr]:
+        # Extract guided choices from SelectNode alternatives
+        guided_choices = []
+        for alt in node.alternatives:
+            if isinstance(alt, LiteralNode):
+                guided_choices.append(alt.value)
+            else:
+                # For non-literal alternatives, we need to serialize them
+                # This is a simplified approach - you might need more sophisticated handling
+                guided_choices.append(str(alt))
+        
+        # Add extra_body with guided_choice to kwargs
+        if 'extra_body' not in kwargs:
+            kwargs['extra_body'] = {}
+        kwargs['extra_body']['guided_choice'] = guided_choices
+        kwargs['extra_body']['chat_template_kwargs'] = {"thinking": False}
+        # Call grammar with modified kwargs - concrete implementations will override this
         return self.grammar(node, **kwargs)
 
     def join(self, node: JoinNode, **kwargs) -> Iterator[OutputAttr]:

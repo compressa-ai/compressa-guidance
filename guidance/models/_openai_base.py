@@ -5,7 +5,7 @@ import wave
 from abc import ABC, abstractmethod
 from copy import deepcopy
 from io import BytesIO
-from typing import TYPE_CHECKING, Any, ContextManager, Iterator, Literal, TypeAlias, cast
+from typing import TYPE_CHECKING, Any, ContextManager, Iterator, Literal, Optional, Union, cast
 
 from pydantic import BaseModel, Discriminator, Field, TypeAdapter
 from typing_extensions import Annotated, assert_never
@@ -14,6 +14,7 @@ from .._ast import (
     ASTNode,
     AudioBlob,
     GenAudio,
+    GrammarNode,
     ImageBlob,
     ImageUrl,
     JsonNode,
@@ -22,6 +23,7 @@ from .._ast import (
     RoleEnd,
     RoleStart,
     RuleNode,
+    SelectNode,
     ToolCallNode,
 )
 from .._schema import TokenUsage
@@ -81,7 +83,7 @@ class ImageUrlContent(BaseModel):
     image_url: ImageUrlContentInner
 
 
-Content: TypeAlias = Annotated[TextContent | AudioContent | ImageUrlContent, Discriminator("type")]
+Content = Annotated[Union[TextContent, AudioContent, ImageUrlContent], Discriminator("type")]
 
 
 class ContentMessage(BaseModel):
@@ -111,7 +113,7 @@ class CustomCall(BaseModel):
     custom: Custom
 
 
-ToolCall = Annotated[FunctionCall | CustomCall, Discriminator("type")]
+ToolCall = Annotated[Union[FunctionCall, CustomCall], Discriminator("type")]
 
 
 class ToolCallMessage(BaseModel):
@@ -125,7 +127,7 @@ class ToolCallResult(BaseModel):
     content: str
 
 
-Message: TypeAlias = ContentMessage | AssistantAudioMessage | ToolCallMessage | ToolCallResult
+Message = Union[ContentMessage, AssistantAudioMessage, ToolCallMessage, ToolCallResult]
 
 
 class OpenAIState(State):
@@ -133,7 +135,7 @@ class OpenAIState(State):
         super().__init__()
         self.messages: list[Message] = []
         self.content: list[Content] = []
-        self.audio: AssistantAudio | None = None
+        self.audio: Optional[AssistantAudio] = None
 
     def apply_text(self, text: str) -> None:
         if len(self.content) > 0 and isinstance(self.content[-1], TextContent):
@@ -141,7 +143,7 @@ class OpenAIState(State):
         else:
             self.content.append(TextContent(type="text", text=text))
 
-    def get_active_message(self) -> Message | None:
+    def get_active_message(self) -> Optional[Message]:
         if self.active_role is None:
             return None
         if self.active_role not in ["system", "user", "assistant"]:
@@ -253,9 +255,9 @@ class BaseOpenAIInterpreter(Interpreter[OpenAIState]):
 
     logprobs: bool = True
     # TODO: have top-k be passed programmatically and only if echo=True
-    top_k: int | None = 5
+    top_k: Optional[int] = 5
 
-    def __init__(self, model: str, client: BaseOpenAIClientWrapper, *, reasoning_effort: str | None = None):
+    def __init__(self, model: str, client: BaseOpenAIClientWrapper, *, reasoning_effort: Optional[str] = None):
         super().__init__(state=OpenAIState())
         self.model = model
         self.client = client
@@ -291,7 +293,7 @@ class BaseOpenAIInterpreter(Interpreter[OpenAIState]):
         self.state.apply_text(node.value)
         yield TextOutput(value=node.value, is_input=True)
 
-    def _run(self, tools: dict[str, Tool] | None = None, **kwargs) -> Iterator[OutputAttr]:
+    def _run(self, tools: Optional[dict[str, Tool]] = None, **kwargs) -> Iterator[OutputAttr]:
         if self.state.active_role is None:
             # Should never happen?
             raise ValueError("OpenAI models require chat blocks (e.g. use `with assistant(): ...`)")
@@ -336,11 +338,11 @@ class BaseOpenAIInterpreter(Interpreter[OpenAIState]):
     def _handle_stream(
         self,
         chunks: Iterator["ChatCompletionChunk"],
-        tools: dict[str, Tool] | None,
+        tools: Optional[dict[str, Tool]],
     ) -> Iterator[OutputAttr]:
         _t0 = time.time()
         t0 = _t0
-        audio: AssistantAudio | None = None
+        audio: Optional[AssistantAudio] = None
         final_tool_calls: dict[int, ToolCall] = {}
         # We made another call to the OpenAI API, so we count it as a round trip.
         usage = TokenUsage(round_trips=1)
@@ -402,8 +404,8 @@ class BaseOpenAIInterpreter(Interpreter[OpenAIState]):
                         )
                 else:
                     yield TextOutput(value=delta.content, is_generated=True, latency_ms=latency_ms)
-            elif (delta_audio := cast(dict | None, getattr(delta, "audio", None))) is not None:
-                transcript_chunk: str | None = None
+            elif (delta_audio := cast(Optional[dict], getattr(delta, "audio", None))) is not None:
+                transcript_chunk: Optional[str] = None
                 if audio is None:
                     assert delta_audio.get("id") is not None
                     audio = AssistantAudio(
@@ -555,6 +557,17 @@ class BaseOpenAIInterpreter(Interpreter[OpenAIState]):
                 setattr(result, k, deepcopy(v, memo))
         return result
 
+    def grammar(self, node: ASTNode, **kwargs) -> Iterator[OutputAttr]:
+        """Handle grammar nodes including SelectNode."""
+        if isinstance(node, GrammarNode):
+            # For SelectNode, the guided_choice should already be in kwargs from the base class select method
+            # We just need to process it with _run
+            yield from self._run(**kwargs)
+        else:
+            # For non-grammar nodes, raise the original error
+            from ._base import UnsupportedNodeError
+            raise UnsupportedNodeError(interpreter=self, node=node)
+
 
 class OpenAIRuleMixin(BaseOpenAIInterpreter):
     def rule(self, node: RuleNode, **kwargs) -> Iterator[OutputAttr]:
@@ -572,6 +585,7 @@ class OpenAIRuleMixin(BaseOpenAIInterpreter):
             kwargs["max_completion_tokens"] = node.max_tokens
 
         chunks = self.run(node.value, **kwargs)
+
         if node.capture:
             buffered_text = ""
             for chunk in chunks:
@@ -592,10 +606,13 @@ class OpenAIRuleMixin(BaseOpenAIInterpreter):
 
 class OpenAIRegexMixin(BaseOpenAIInterpreter):
     def regex(self, node: RegexNode, **kwargs) -> Iterator[OutputAttr]:
+        add_args = {}
         if node.regex is not None:
-            raise ValueError("Regex not yet supported for OpenAI")
+            print("Experimental mode for regular expression inclusion")
+            add_args = {"extra_body": {"guided_regex": node.regex, "chat_template_kwargs": {"thinking": False}}}
+
         # We're in unconstrained mode now.
-        return self._run(**kwargs)
+        return self._run(**kwargs, **add_args)
 
 
 class OpenAIJSONMixin(BaseOpenAIInterpreter):
